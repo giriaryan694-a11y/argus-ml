@@ -1,0 +1,5 @@
+pyfiglet
+Markdown
+openai
+google-genai
+picklescan
