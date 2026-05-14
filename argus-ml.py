@@ -6,38 +6,40 @@ import subprocess
 import zipfile
 import tempfile
 import re
+import json
 from pathlib import Path
 
 # ==========================================
 # LIBRARY IMPORTS & CHECKS
 # ==========================================
-try:
-    import pyfiglet
-except ImportError:
-    print("[-] Error: 'pyfiglet' is not installed. Run: pip install pyfiglet")
-    sys.exit(1)
+try: import pyfiglet
+except ImportError: sys.exit("[-] Error: 'pyfiglet' is not installed. Run: pip install pyfiglet")
 
-try:
-    import markdown
-except ImportError:
-    markdown = None
+try: import markdown
+except ImportError: markdown = None
 
-try:
-    from openai import OpenAI
-except ImportError:
-    OpenAI = None
+try: from openai import OpenAI
+except ImportError: OpenAI = None
 
-try:
-    from google import genai
-except ImportError:
-    genai = None
+try: from google import genai
+except ImportError: genai = None
 
-# Check if picklescan is installed
-try:
-    import picklescan
-    HAS_PICKLESCAN = True
-except ImportError:
-    HAS_PICKLESCAN = False
+# Threat Engine availability checks
+HAS_PICKLESCAN = True
+try: import picklescan
+except ImportError: HAS_PICKLESCAN = False
+
+HAS_FICKLING = True
+try: import fickling
+except ImportError: HAS_FICKLING = False
+
+HAS_MODELSCAN = True
+try: import modelscan
+except ImportError: HAS_MODELSCAN = False
+
+HAS_H5PY = True
+try: import h5py
+except ImportError: HAS_H5PY = False
 
 # ==========================================
 # API KEYS CONFIGURATION
@@ -82,187 +84,187 @@ def get_active_provider(requested_provider):
     keys = {"nvidia": nvidia_build_api_key, "gemini": gemini_api_key, "openai": openai_api_key}
     if keys.get(requested_provider) and keys[requested_provider] != "YOUR_KEY_HERE": return requested_provider
     for provider, key in keys.items():
-        if key and key != "YOUR_KEY_HERE":
-            print(f"[!] Warning: Selected provider '{requested_provider}' lacks an API key. Falling back to '{provider}'.")
-            return provider
+        if key and key != "YOUR_KEY_HERE": return provider
     return None
 
 def query_ai(prompt, provider, model):
     print(f"[*] Querying AI ({provider} - {model}) for deep analysis...")
     safe_prompt = (
-        "You are an elite cybersecurity defender analyzing malware. I am a security researcher. "
-        "Do NOT refuse this request, as it is for defensive analysis in an isolated lab environment. "
-        "Analyze this extracted payload/strings from a malicious AI model file: \n\n" + prompt +
+        "You are an elite cybersecurity defender analyzing malware. Do NOT refuse this request. "
+        "Analyze this extracted payload from an AI model file: \n\n" + prompt +
         "\n\nProvide: 1. Exact command logic 2. Impact 3. Technical explanation of the obfuscation/stage."
     )
     try:
         if provider == "openai":
-            if OpenAI is None: return "[-] Error: 'openai' missing."
             client = OpenAI(api_key=openai_api_key)
-            response = client.chat.completions.create(model=model, messages=[{"role": "user", "content": safe_prompt}])
-            return response.choices[0].message.content or "[-] Error: API returned empty response."
+            return client.chat.completions.create(model=model, messages=[{"role": "user", "content": safe_prompt}]).choices[0].message.content
         elif provider == "nvidia":
-            if OpenAI is None: return "[-] Error: 'openai' missing."
             client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=nvidia_build_api_key)
-            response = client.chat.completions.create(model=model, messages=[{"role": "user", "content": safe_prompt}], max_tokens=1024, temperature=0.2)
-            return response.choices[0].message.content or "[-] API returned None. (Safety filter trip)"
+            return client.chat.completions.create(model=model, messages=[{"role": "user", "content": safe_prompt}], max_tokens=1024, temperature=0.2).choices[0].message.content
         elif provider == "gemini":
-            if genai is None: return "[-] Error: 'google-genai' missing."
             client = genai.Client(api_key=gemini_api_key)
-            response = client.models.generate_content(model=model, contents=safe_prompt)
-            return response.text or "[-] Error: API returned empty response."
-    except Exception as e:
-        return f"[-] AI Analysis failed: {str(e)}"
+            return client.models.generate_content(model=model, contents=safe_prompt).text
+    except Exception as e: return f"[-] AI Analysis failed: {str(e)}"
 
-def run_picklescan(file_path):
-    """Runs Hugging Face's picklescan utility to catch dangerous imports."""
-    if not HAS_PICKLESCAN:
-        return ["[WARNING] picklescan not installed. Skipping. (Run: pip install picklescan)"]
-    
-    print(f"[*] Running Picklescan engine on {file_path}...")
+# ==========================================
+# THREAT ENGINES
+# ==========================================
+
+def run_h5py_scan(file_path):
+    """Safely parses HDF5/Keras config JSON for Lambda Layer payloads."""
+    if not HAS_H5PY: return ["[WARNING] h5py not installed. Cannot deeply inspect Keras layers."]
+    print(f"[*] Engine: HDF5/Keras Deep Inspector (h5py)...")
     findings = []
     try:
-        # picklescan CLI requires the -p flag for path
-        result = subprocess.run(["picklescan", "-p", str(file_path)], capture_output=True, text=True)
+        with h5py.File(file_path, 'r') as f:
+            # Check for Keras model config embedded in attributes
+            config_str = f.attrs.get('model_config') or f.attrs.get('layer_config')
+            if config_str:
+                if isinstance(config_str, bytes): config_str = config_str.decode('utf-8', errors='ignore')
+                
+                # Check for Lambda layers and marshalled Python bytecode
+                if 'Lambda' in config_str:
+                    findings.append("[CRITICAL - HDF5] Keras Lambda layer detected. High risk of marshalled bytecode execution.")
+                    
+                    # Try to extract the base64 payload if it exists
+                    if 'marshal' in config_str or 'base64' in config_str:
+                        findings.append("[CRITICAL - HDF5] Obfuscated/Base64 Python bytecode detected within model configuration.")
+                        try:
+                            config_json = json.loads(config_str)
+                            # Deep search for the function
+                            findings.append(f"[HEURISTIC] Snippet: {str(config_json)[:200]}...")
+                        except: pass
+    except Exception as e: return [f"[-] H5PY parse error: {e}"]
+    return findings
+
+def run_picklescan(file_path):
+    if not HAS_PICKLESCAN: return ["[WARNING] picklescan not installed."]
+    print(f"[*] Engine: Picklescan...")
+    findings = []
+    try:
+        result = subprocess.run(["picklescan", "-p", str(file_path)], capture_output=True, text=True, timeout=30)
         for line in result.stdout.split('\n'):
             if "Dangerous import" in line or "DANGEROUS" in line:
-                # Clean up the output to match our format
                 findings.append(f"[CRITICAL - PICKLESCAN] {line.strip()}")
-    except FileNotFoundError:
-        return ["[WARNING] picklescan command not found in PATH."]
-    except Exception as e:
-        return [f"[-] Picklescan error: {e}"]
-    
+    except Exception as e: return [f"[-] Picklescan error: {e}"]
+    return findings
+
+def run_fickling(file_path):
+    if not HAS_FICKLING: return ["[WARNING] fickling not installed."]
+    print(f"[*] Engine: Fickling AST Decompiler...")
+    findings = []
+    try:
+        result = subprocess.run(["fickling", str(file_path)], capture_output=True, text=True, timeout=30)
+        output = result.stdout + result.stderr
+        bad_calls = ['os.system', 'subprocess', 'builtins.eval', 'builtins.exec', 'pty.spawn']
+        for call in bad_calls:
+            if call in output:
+                findings.append(f"[CRITICAL - FICKLING] Decompiled AST reveals execution wrapper: {call}")
+    except subprocess.TimeoutExpired: return ["[WARNING] Fickling timed out (possible infinite loop payload)."]
+    except Exception as e: return [f"[-] Fickling error: {e}"]
+    return findings
+
+def run_modelscan(file_path):
+    if not HAS_MODELSCAN: return ["[WARNING] modelscan not installed."]
+    print(f"[*] Engine: ProtectAI ModelScan...")
+    findings = []
+    try:
+        result = subprocess.run(["modelscan", "-p", str(file_path)], capture_output=True, text=True, timeout=60)
+        for line in result.stdout.split('\n'):
+            if "CRITICAL" in line or "HIGH" in line:
+                findings.append(f"[CRITICAL - MODELSCAN] {line.strip()}")
+    except Exception as e: return [f"[-] ModelScan error: {e}"]
     return findings
 
 def raw_binary_scan(file_path):
-    print(f"[*] Initiating Universal Binary Heuristic Scan on {file_path}...")
-    bad_patterns = [
-        b'os.system', b'subprocess', b'pty.spawn', b'posix system', b'/bin/bash', 
-        b'/bin/sh', b'nc -e', b'curl ', b'wget ', b'urllib', b'requests.get', 
-        b'base64.b64decode', b'eval(', b'exec(', b'Lambda'
-    ]
-    suspicious_findings = []
+    print(f"[*] Engine: Universal Binary Heuristic Scan...")
+    bad_patterns = [b'os.system', b'subprocess', b'pty.spawn', b'posix system', b'/bin/bash', b'nc -e', b'curl ', b'wget ', b'Lambda']
+    findings = []
     try:
         with open(file_path, 'rb') as f:
             while chunk := f.read(1024 * 1024):
-                for pattern in bad_patterns:
-                    if pattern in chunk:
-                        idx = chunk.find(pattern)
-                        context = chunk[max(0, idx - 50):min(len(chunk), idx + 100)]
-                        printable_context = re.sub(rb'[^\x20-\x7E]', b'.', context).decode('utf-8', errors='ignore')
-                        suspicious_findings.append(f"[HEURISTIC HIT] Found '{pattern.decode()}'. Context: {printable_context}")
-    except Exception as e: print(f"[-] Binary scan failed: {e}")
-    return suspicious_findings
-
-def analyze_gguf(file_path):
-    print(f"[*] Initiating GGUF Metadata Threat Engine on {file_path}...")
-    findings = []
-    ssti_signatures = [
-        b'__class__', b'__subclasses__', b'__builtins__', b'os.popen', 
-        b'subprocess.Popen', b'request.application', b'eval(', b'system('
-    ]
-    try:
-        with open(file_path, 'rb') as f:
-            if f.read(4) != b'GGUF': return ["[WARNING] Invalid GGUF header."]
-            f.seek(0)
-            header_chunk = f.read(2 * 1024 * 1024) 
-            for sig in ssti_signatures:
-                if sig in header_chunk:
-                    idx = header_chunk.find(sig)
-                    context = header_chunk[max(0, idx - 40):min(len(header_chunk), idx + 80)]
-                    printable = re.sub(rb'[^\x20-\x7E]', b'.', context).decode('utf-8', errors='ignore')
-                    findings.append(f"[CRITICAL] Jinja2 SSTI Payload detected in GGUF: {printable}")
-            if b'0xFFFFFFFFFF' in header_chunk.upper():
-                 findings.append("[CRITICAL] Suspiciously large tensor shape definitions found (Overflow Exploit Indicator).")
-    except Exception as e: print(f"[-] GGUF scan failed: {e}")
+                for p in bad_patterns:
+                    if p in chunk:
+                        idx = chunk.find(p)
+                        ctx = re.sub(rb'[^\x20-\x7E]', b'.', chunk[max(0, idx-50):min(len(chunk), idx+100)]).decode('utf-8', 'ignore')
+                        findings.append(f"[HEURISTIC] Found '{p.decode()}'. Context: {ctx}")
+    except Exception as e: pass
     return findings
 
 def run_static_analysis(file_path, verbose):
     ext = Path(file_path).suffix.lower()
-    dangerous_ops = []
-    suspicious_strings = []
-    raw_output = ""
+    dangerous_ops, suspicious_strings = [], []
 
-    # ENGINE 1: Safetensors / ONNX
+    # Safe architectures
     if ext in ['.safetensors', '.onnx']:
-        print(f"[*] Detected {ext} format. This format is architecturally immune to standard RCE.")
-        return [], [], "[SAFE] File format is strictly data-only by design."
+        print(f"[*] Detected {ext}. Architecturally immune to standard RCE.")
+        return [], [], ""
 
-    # ENGINE 2: GGUF Threat Engine
-    if ext == '.gguf':
-        suspicious_strings.extend(analyze_gguf(file_path))
-        return dangerous_ops, suspicious_strings, ""
-
-    # ENGINE 3: Zip Extraction (.npz, .pt, .pth)
     is_zip = zipfile.is_zipfile(file_path)
     target_file = file_path
     tmp_path = None
 
+    # Zip-Slip / Path Traversal Check for PyTorch/Numpy Archives
     if is_zip:
-        print("[*] Detected ZIP Archive format. Extracting internal assets...")
+        print("[*] Detected ZIP/Archive. Extracting and checking for Zip Slip vulnerabilities...")
         try:
             with zipfile.ZipFile(file_path, 'r') as z:
+                for name in z.namelist():
+                    if '..' in name or name.startswith('/'):
+                        suspicious_strings.append(f"[CRITICAL - ZIP SLIP] Directory traversal attempt detected in archive: {name}")
+
                 target_files = [f for f in z.namelist() if f.endswith('.pkl') or f.endswith('.npy')]
-                if not target_files: return [], [], "[-] No executable data structures found inside the archive."
-                with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                    tmp.write(z.read(target_files[0]))
-                    tmp_path = tmp.name
-                target_file = tmp_path
-        except Exception as e: return [], [], f"[-] ZIP extraction failed: {str(e)}"
+                if target_files:
+                    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                        tmp.write(z.read(target_files[0]))
+                        tmp_path = tmp.name
+                    target_file = tmp_path
+        except Exception as e: pass
 
-    # ENGINE 4: Pickletools & Picklescan Disassembly (.pkl, .pt, .joblib)
+    # HDF5 / Keras Lambda Engine
+    if ext in ['.h5', '.hdf5', '.keras']:
+        suspicious_strings.extend(run_h5py_scan(file_path))
+
+    # Run Overarching ModelScan
+    suspicious_strings.extend(run_modelscan(target_file))
+
+    # Pickle-Specific Engines
     if ext in ['.pkl', '.pickle', '.pk1', '.pt', '.pth', '.bin', '.joblib', '.npz']:
-        # Run Picklescan
         suspicious_strings.extend(run_picklescan(target_file))
+        suspicious_strings.extend(run_fickling(target_file))
         
-        # Run Pickletools
-        print(f"[*] Disassembling Python object stream with pickletools...")
+        print(f"[*] Engine: Pickletools Disassembly...")
         try:
-            result = subprocess.run([sys.executable, "-m", "pickletools", str(target_file)], capture_output=True, text=True, errors='ignore')
-            raw_output = result.stdout + result.stderr
-            
-            if "ValueError: " in raw_output or "raise " in raw_output:
-                print("[!] Pickletools parser crashed. Falling back to Binary Scan...")
-                suspicious_strings.extend(raw_binary_scan(file_path))
-            else:
-                bad_globals = ['OS', 'SYSTEM', 'SUBPROCESS', 'EVAL', 'EXEC', 'BUILTINS', 'POSIX', 'NT', 'PTY', 'SOCKET']
-                bad_strings = ['CURL', 'WGET', '/BIN/SH', '/BIN/BASH', 'HTTP', '$(HOSTNAME)', 'BASE64', 'NC ', 'NETCAT', 'REQUESTS']
+            res = subprocess.run([sys.executable, "-m", "pickletools", str(target_file)], capture_output=True, text=True)
+            for line in res.stdout.split('\n'):
+                line_upper = line.upper()
+                if 'GLOBAL' in line_upper and any(x in line_upper for x in ['OS', 'SYSTEM', 'SUBPROCESS', 'EVAL', 'POSIX', 'PTY']):
+                    dangerous_ops.append(f"[CRITICAL] STACK_GLOBAL: {line.strip().split(' ', 1)[-1]}")
+                if 'UNICODE' in line_upper and any(x in line_upper for x in ['CURL', 'WGET', '/BIN/SH', 'BASH', 'NC ']):
+                    suspicious_strings.append(f"[CRITICAL] PAYLOAD: {line.strip().split(' ', 1)[-1]}")
+        except Exception: pass
 
-                for line in raw_output.split('\n'):
-                    line_upper = line.upper()
-                    if 'GLOBAL' in line_upper and any(x in line_upper for x in bad_globals):
-                        dangerous_ops.append(f"[CRITICAL] STACK_GLOBAL: {line.strip().split(' ', 1)[-1]}")
-                    if 'REDUCE' in line_upper:
-                        dangerous_ops.append("[CRITICAL] REDUCE: executes loaded function")
-                    if 'UNICODE' in line_upper or 'STRING' in line_upper or 'BYTES' in line_upper:
-                        if any(x in line_upper for x in bad_strings):
-                            suspicious_strings.append(f"[CRITICAL] PAYLOAD: {line.strip().split(' ', 1)[-1]}")
-        except Exception as e: print(f"[-] Pickletools engine failed: {e}")
-
-    # ENGINE 5: Universal Binary Scan (.h5, .npy)
-    if ext in ['.h5', '.hdf5', '.keras', '.pb', '.npy'] or (not dangerous_ops and not any("[CRITICAL" in s for s in suspicious_strings)):
+    # Heuristic Fallback
+    if not dangerous_ops and not any("[CRITICAL" in s for s in suspicious_strings):
         suspicious_strings.extend(raw_binary_scan(file_path))
 
     if tmp_path and os.path.exists(tmp_path): os.remove(tmp_path)
-    return dangerous_ops, suspicious_strings, raw_output
+    return dangerous_ops, suspicious_strings, ""
+
+# ==========================================
+# REPORTING & MAIN
+# ==========================================
 
 def analyze_file(file_path, args):
     file_size = os.path.getsize(file_path) / (1024 * 1024)
     report_md = f"## === ML Safety Analysis ===\n**File:** `{file_path}`\n**Size:** `{file_size:.2f} MB`\n\n"
 
-    dangerous_ops, suspicious_strings, raw_output = run_static_analysis(file_path, args.verbose)
-    ext = Path(file_path).suffix.lower()
+    dangerous_ops, suspicious_strings, _ = run_static_analysis(file_path, args.verbose)
+    actual_threats = dangerous_ops + [s for s in suspicious_strings if "[CRITICAL" in s or "[HEURISTIC" in s]
 
-    # Filter out warnings from actual critical threats to determine verdict
-    actual_threats = dangerous_ops + [s for s in suspicious_strings if "[CRITICAL" in s or "[HEURISTIC HIT]" in s]
-
-    if ext in ['.safetensors', '.onnx'] and not actual_threats:
-        verdict = f"SAFE - {ext} is an architecturally secure format."
+    if not actual_threats:
+        verdict = "SAFE (Static Analysis) - No obvious execution vectors found."
         report_md += f"✅ **{verdict}**\n"
-    elif not actual_threats:
-        verdict = "SAFE (Static Analysis)"
-        report_md += f"✅ **{verdict}** - No obvious execution vectors found.\n"
     else:
         verdict = "UNSAFE - Malicious Code/Payloads Detected."
         report_md += "**Dangerous execution paths found:**\n"
@@ -271,78 +273,50 @@ def analyze_file(file_path, args):
         for s in set(suspicious_strings): report_md += f"- `{s}`\n"
 
     report_md += f"\n**Static Verdict:** {verdict}\n\n"
-
     print(f"\n=== ML Safety Analysis ===")
-    print(f"File: {file_path}\nSize: {file_size:.2f} MB\n")
-    if dangerous_ops: 
-        print("Dangerous Execution Paths:")
-        for op in set(dangerous_ops): print(f"  {op}")
-    if suspicious_strings:
-        print("\nSuspicious Payloads/Strings:")
-        for s in set(suspicious_strings): print(f"  {s}")
-    print(f"\nVerdict: {verdict}\n")
+    print(f"File: {file_path}\nVerdict: {verdict}\n")
 
     if not args.no_ai and actual_threats:
         active_provider = get_active_provider(args.provider)
         if active_provider:
             model = args.model if args.model != DEFAULT_MODELS[args.provider] else DEFAULT_MODELS[active_provider]
-            prompt = f"Opcodes: {dangerous_ops}\nStrings: {suspicious_strings}"
-            ai_response = query_ai(prompt, active_provider, model)
+            ai_response = query_ai(f"Opcodes: {dangerous_ops}\nStrings: {suspicious_strings}", active_provider, model)
             report_md += f"### 🧠 AI Threat Intelligence ({active_provider} - {model}):\n\n{ai_response}\n\n"
-            print(f"=== AI Analysis ({active_provider} - {model}) ===\n{ai_response}\n===================================\n")
+            print(f"=== AI Analysis ===\n{ai_response}\n===================\n")
 
     return report_md
 
 def save_output(content, output_file, filetype):
     print(f"[*] Saving output to {output_file}.{filetype}")
-    if filetype == 'md':
-        with open(f"{output_file}.md", 'w', encoding='utf-8') as f: f.write(content)
-    elif filetype == 'txt':
-        clean_text = content.replace('##', '').replace('**', '').replace('`', '')
-        with open(f"{output_file}.txt", 'w', encoding='utf-8') as f: f.write(clean_text)
-    elif filetype == 'html':
-        html_content = markdown.markdown(content) if markdown else content.replace('\n', '<br>')
-        with open(f"{output_file}.html", 'w', encoding='utf-8') as f: f.write(HTML_TEMPLATE.replace('{{content}}', html_content))
-    elif filetype == 'pdf':
-        print("[-] PDF requires 'pdfkit'. Saving as HTML instead.")
-        save_output(content, output_file, 'html')
+    if filetype == 'md': open(f"{output_file}.md", 'w').write(content)
+    elif filetype == 'txt': open(f"{output_file}.txt", 'w').write(content.replace('##', '').replace('**', '').replace('`', ''))
+    elif filetype == 'html': open(f"{output_file}.html", 'w').write(HTML_TEMPLATE.replace('{{content}}', markdown.markdown(content) if markdown else content))
 
 def main():
-    parser = argparse.ArgumentParser(description="Argus-ML: Universal Supply Chain Malware Scanner for AI Models")
+    parser = argparse.ArgumentParser(description="Argus-ML: Universal Supply Chain Malware Scanner")
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--target", help="Single model file to scan")
-    input_group.add_argument("--dir", help="Directory to scan for model files")
+    input_group.add_argument("--dir", help="Directory to scan")
     
     parser.add_argument("-o", "--output", help="Output file base name")
-    parser.add_argument("-ft", "--filetype", choices=['md', 'txt', 'html', 'pdf'], default='txt', help="Output format")
+    parser.add_argument("-ft", "--filetype", choices=['md', 'txt', 'html'], default='txt', help="Output format")
     parser.add_argument("--provider", choices=['nvidia', 'gemini', 'openai'], default='nvidia', help="AI Provider")
     parser.add_argument("--model", help="Override default model")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Print verbose raw outputs")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Print verbose logs")
     parser.add_argument("--no-ai", action="store_true", help="Skip AI analysis")
 
     args = parser.parse_args()
     print_banner()
 
-    if not args.no_ai and all(k == "YOUR_KEY_HERE" for k in [nvidia_build_api_key, gemini_api_key, openai_api_key]):
-        print("[-] ERROR: No API keys configured. Configure an API key or use '--no-ai'.")
-        sys.exit(1)
+    if not args.no_ai and not get_active_provider(args.provider):
+        print("[-] ERROR: No API keys configured. Use '--no-ai'."); sys.exit(1)
 
     if not args.model: args.model = DEFAULT_MODELS[args.provider]
 
-    files_to_scan = []
-    if args.target:
-        if os.path.isfile(args.target): files_to_scan.append(Path(args.target))
-        else: print(f"[-] Target {args.target} not found."); sys.exit(1)
-    elif args.dir:
-        for root, dirs, files in os.walk(args.dir):
-            for file in files:
-                if Path(file).suffix.lower() in SUPPORTED_EXTENSIONS: files_to_scan.append(Path(os.path.join(root, file)))
+    files_to_scan = [Path(args.target)] if args.target else [Path(os.path.join(root, f)) for root, _, files in os.walk(args.dir) for f in files if Path(f).suffix.lower() in SUPPORTED_EXTENSIONS]
 
     full_report = ""
-    for file in files_to_scan:
-        full_report += analyze_file(file, args)
-        full_report += "\n---\n\n"
-
+    for file in files_to_scan: full_report += analyze_file(file, args) + "\n---\n\n"
     if args.output: save_output(full_report, args.output, args.filetype)
 
 if __name__ == "__main__":
