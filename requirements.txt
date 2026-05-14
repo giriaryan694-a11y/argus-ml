@@ -1,8 +1,11 @@
-pyfiglet
-Markdown
-openai
-google-genai
-picklescan
-modelscan
-fickling
-h5py
+# Argus-ML Dependencies
+pyfiglet==1.0.2
+Markdown==3.10.2
+openai==1.61.1
+google-genai==1.2.0
+
+# Enterprise Threat Engines
+picklescan==1.0.4
+modelscan==0.7.0
+fickling==0.1.3
+h5py==3.11.0
