@@ -3,3 +3,6 @@ Markdown
 openai
 google-genai
 picklescan
+modelscan
+fickling
+h5py
